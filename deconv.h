@@ -149,7 +149,6 @@ void deconv(data_stream<P_ICH * A_BIT>& in,
     constexpr unsigned LB_H =
         (RESIDENT_ROWS + 1 < N_IH) ? (RESIDENT_ROWS + 1) : N_IH;
 /*-------------------------end-----------------------------------------------------------------*/
-
     ap_uint<P_ICH * A_BIT> line_buf[LB_H][N_IW][FOLD_I];
     ap_int<B_BIT> acc[P_OCH];
 /*--------------------------set up stage ih0------------------------------------------------------ */
@@ -168,40 +167,14 @@ void deconv(data_stream<P_ICH * A_BIT>& in,
 /*------------------------end----------------------------------------------------------------- */
     for (unsigned oh = 0; oh < N_OH; ++oh)
     {
-        //中间的每一个oh计算所需的最大ih
-        int max_ih_needed = deconv_max_input_coordinate<K, P, S, N_IH>(oh);
-
-        // 新输出行开始前，只补到 ow=0 所需的最大 iw；不提前补齐整行，细粒度优化。
-        int max_iw_ow0 = deconv_max_input_coordinate<K, P, S, N_IW>(0);
-        // while消费连续输入，直到当前输出行的ow=0所依赖的最大输入位置已经写完（max_ih_needed，max_iw_ow0）
-        while (max_ih_needed >= 0 && max_iw_ow0 >= 0 && ih_to_read < N_IH &&
-               (ih_to_read < static_cast<unsigned>(max_ih_needed) ||
-                (ih_to_read == static_cast<unsigned>(max_ih_needed) &&
-                 iw_to_read <= static_cast<unsigned>(max_iw_ow0))//已经到达最高输入行
-                ))
-        {
-            deconv_write_input_beat<P_ICH, A_BIT, LB_H, N_IW, FOLD_I>(
-                in, line_buf, ih_to_read, iw_to_read, fi_to_read);//填充到最大输入行
-        }
+        // 当前 oh 计算期间，若 oh+1 引入新的最高 IFM 行，则预取完整新行。
+        unsigned next_ih = (oh + 1 + P) / S;
+        bool prefetch_next_input_row =  //flag
+            (oh + 1 < N_OH) && (((oh + 1 + P) % S) == 0) &&
+            (next_ih < N_IH);
 
         for (unsigned ow = 0; ow < N_OW; ++ow)
         {
-            // 中间 ow 开始前只等待该 ow 实际会访问的最大输入列。
-            int max_iw_needed = deconv_max_input_coordinate<K, P, S, N_IW>(ow);
-            // 计算当前oh时，为新的oh做预取行指针，边算边存
-            int max_ih_next = (oh + 1 < N_OH)
-                                  ? deconv_max_input_coordinate<K, P, S, N_IH>(oh + 1)
-                                  : -1;
-            // while消费连续输入，直到当前输出行的ow所依赖的最大输入位置已经写完（max_ih_needed，max_iw_needed）
-            while (max_ih_needed >= 0 && max_iw_needed >= 0 && ih_to_read < N_IH &&
-                   (ih_to_read < static_cast<unsigned>(max_ih_needed) ||
-                    (ih_to_read == static_cast<unsigned>(max_ih_needed) &&
-                     iw_to_read <= static_cast<unsigned>(max_iw_needed))))
-            {
-                deconv_write_input_beat<P_ICH, A_BIT, LB_H, N_IW, FOLD_I>(
-                    in, line_buf, ih_to_read, iw_to_read, fi_to_read);
-            }
-
             for (unsigned fo = 0; fo < FOLD_O; ++fo)
             {
                 // ---- 清零累加器 ----
@@ -209,7 +182,6 @@ void deconv(data_stream<P_ICH * A_BIT>& in,
                 {
                     acc[poc] = 0;
                 }
-
                 // ---- 卷积核循环 (倒序, 与正序数学等价) ----
                 for (signed kh = K - 1; kh >= 0; kh--)
                 {
@@ -217,15 +189,12 @@ void deconv(data_stream<P_ICH * A_BIT>& in,
                     {
                         int h_temp = oh - kh + P;
                         int w_temp = ow - kw + P;
-
                         for (unsigned fi = 0; fi < FOLD_I; ++fi)
                         {
                             ap_uint<P_OCH * P_ICH * W_BIT> wt_buf = weight[fo][fi][kh * K + kw];
-
-                            // 每个 ow 的首个 kernel 事务中，按 fi 与 MAC 交错写入下一 IFM 像素。
-                            if (fo == 0 && kh == K - 1 && kw == K - 1 &&
-                                max_ih_next >= 0 && ih_to_read < N_IH &&
-                                ih_to_read <= static_cast<unsigned>(max_ih_next))
+                            // 预取期间每个 fi 事务连续写一个输入 beat，直到目标行写满。
+                            if (prefetch_next_input_row && ih_to_read < N_IH &&
+                                ih_to_read <= next_ih)
                             {
                                 deconv_write_input_beat<P_ICH, A_BIT, LB_H, N_IW, FOLD_I>(
                                     in, line_buf, ih_to_read, iw_to_read, fi_to_read);
@@ -269,12 +238,10 @@ void deconv(data_stream<P_ICH * A_BIT>& in,
                     }  // kw
                 }  // kh
             }  // fo
-
-            // ow 行尾不能留下半行 IFM：补满后再进入下一 oh 的 ow=0 就绪检查。
-            if (ow == N_OW - 1 && max_ih_next >= 0)
+            // ow 行尾补满正在预取的新 IFM 行；MAC输出比新行ram写入快。
+            if (ow == N_OW - 1 && prefetch_next_input_row)
             {
-                while (ih_to_read < N_IH &&
-                       ih_to_read <= static_cast<unsigned>(max_ih_next))
+                while (ih_to_read <= next_ih)
                 {
                     deconv_write_input_beat<P_ICH, A_BIT, LB_H, N_IW, FOLD_I>(
                         in, line_buf, ih_to_read, iw_to_read, fi_to_read);
