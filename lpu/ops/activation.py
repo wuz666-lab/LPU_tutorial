@@ -21,7 +21,8 @@ def op_softmax(matrix_mn):
         # 这里只是做指令集验证，后面softmax会放到矩阵乘法后面
         matrix_m1n1m0n0_l0 = isa.gdma_mov2lmb(matrix_n1mn0_l2, M_L2, l0_m_start_in_l2, N1_L2, 0, m_size_l0, N1_L2)
         # max = torch.max(scale_)
-        max_m1n1m0n0_arb, = isa.aru(slice_m=m_size_l0, slice_n=N_L2,
+        # reduce -> max
+        max_m1n1m0n0_arb, = isa.aru(slice_m=m_size_l0, slice_n=N_L2,                         
                       psb_m1n1m0n0=matrix_m1n1m0n0_l0, psb_rd_en=True, ub_m1n1m0n0=None, ub_rd_en=False,
                       arb_in=None, arb_en=False, br_m=False, br_n=False, scalar_en = False, scalar=None, 
                       add_en=False, sub_en=False, max_en=False, min_en=False,
@@ -31,12 +32,8 @@ def op_softmax(matrix_mn):
                       reduce_m_en=False, reduce_n_en=True, reduce_mode=0, # max reduce, 
                       ub_wr_en=False, ub_layout=0, gm_wr_en=False, arb_wr_en=True
                       )
-        """
-        sub = x - max
-        exp = torch.exp(sub)
-        sum = torch.sum(exp)
-        """
-        exp_m1n1m0n0_ub, sum_arb, = isa.aru(m_size_l0, N_L2,
+        # broadcast max -> sub -> exp | ub -> sum | arb 
+        exp_m1n1m0n0_ub, sum_arb, = isa.aru(m_size_l0, N_L2,                   
                       psb_m1n1m0n0=matrix_m1n1m0n0_l0, psb_rd_en=True, ub_m1n1m0n0=None, ub_rd_en=False,
                       arb_in=max_m1n1m0n0_arb, arb_en=True, br_m=False, br_n=True, scalar_en=False, scalar=None, 
                       add_en=False, sub_en=True, max_en=False, min_en=False,
@@ -54,11 +51,11 @@ def op_softmax(matrix_mn):
                       mul_en=False, div_en=True, neg_en=False, clamp_en=False,
                       clamp_min=None, clamp_max=None, exp_en=False, sqrt_en=False,
                       pow_en=False, recp_en=False,
-                      reduce_m_en=False, reduce_n_en=False, reduce_mode=0,
+                      reduce_m_en=False, reduce_n_en=False, reduce_mode=-1, # sum reduce
                       ub_wr_en=True, ub_layout=1, gm_wr_en=False, arb_wr_en=False
                       )
         result_mn[l0_m_start_in_l2:l0_m_start_in_l2 + m_size_l0, :] = k1mk0_to_mk(result_n1mn0, N_L2)
-    return result_mn
+    return result_mn    
 
 def op_layernorm(matrix_mn):
     M_L2 = matrix_mn.shape[0]
@@ -184,7 +181,7 @@ def op_sigmoid(matrix_mn):
         matrix_m1n1m0n0_l0 = isa.gdma_mov2lmb(matrix_n1mn0_l2, m_size_l0, N1_L2, 0, M_L2, N1_L2)
         # exp = torch.exp(-x)
         exp_m1n1m0n0_ub = isa.aru(m_size_l0, N_L2,
-                      psb_m1n1m0n0=matrix_m1n1m0n0_l0, psb_rd_en=True, ub_m1n1m0n0=None, ub_rd_en=False,
+                      psb_m1n1m0n0=matrix_m1n1m0n0_l0, psb_rd_en=False, ub_m1n1m0n0=None, ub_rd_en=False,
                       arb_in=None, arb_en=False, br_m=False, br_n=False, scalar_en=False, scalar=None, 
                       add_en=False, sub_en=False, max_en=False, min_en=False,
                       mul_en=False, div_en=False, neg_en=False, clamp_en=False,
@@ -196,7 +193,7 @@ def op_sigmoid(matrix_mn):
         # sigmoid = 1 / (1 + exp) 这里的1怎么给进去有点纠结，在指令里直接给，还是先把数据给到UB，然后把数据从UB搬运到ARB，这么做太麻烦了。
         # 感觉可以在指令域段里给一个scalar域段，binary操作可以选择从scalar获取一路数据，这样比较符合直觉，缺点是每个binary都要增加一个域段，标识数据从哪里进
         sigmoid_m1n1m0n0_ub = isa.aru(m_size_l0, N_L2,
-                      psb_m1n1m0n0=None, psb_rd_en=False, ub_m1n1m0n0=exp_m1n1m0n0_ub, ub_rd_en=True,
+                      psb_m1n1m0n0=None, psb_rd_en=False, ub_m1n1m0n0=sigmoid_m1n1m0n0_ub, ub_rd_en=True,
                       arb_in=exp_m1n1m0n0_ub, arb_en=False, br_m=False, br_n=False, scalar_en=True, scalar=1., 
                       add_en=True, sub_en=False, max_en=False, min_en=False, mul_en=False, div_en=False, 
                       neg_en=False, clamp_en=False, clamp_min=None, clamp_max=None, exp_en=False, sqrt_en=False, pow_en=False, recp_en=False,

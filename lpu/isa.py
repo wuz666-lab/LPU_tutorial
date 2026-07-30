@@ -158,8 +158,8 @@ class ISA:
             reduce_m_en, reduce_n_en, reduce_mode, \
             ub_wr_en, ub_layout, gm_wr_en, arb_wr_en):
 
-        M1 = ceil_div(slice_m, M0)
-        N1 = ceil_div(slice_n, N0)
+        # M1 = ceil_div(slice_m, M0)
+        # N1 = ceil_div(slice_n, N0)
 
         if(psb_rd_en == False and ub_rd_en == True and arb_en == False and scalar_en == False):
             x1 = ub_m1n1m0n0

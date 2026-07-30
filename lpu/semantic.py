@@ -51,12 +51,10 @@ def Unary(x, neg_en, clamp_en, clamp_min, clamp_max, exp_en, sqrt_en, pow_en, re
     if recp_en:
         x = 1.0 / x
     return x
-
+# input m1n1m0n0
 def Reduce(x, slice_m, slice_n, reduce_m_en, reduce_n_en, reduce_mode):
-    # x is in m1n1m0n0 layout: (M1, N1, M0, N0)
-    # Reshape to (M, N), slice to actual data region, then reduce
-    M1, N1, M0, N0_val = x.shape
-    x_mn = x.permute(0, 2, 1, 3).reshape(M1 * M0, N1 * N0_val)
+    M1, N1, M0, N0 = x.shape
+    x_mn = x.permute(0, 2, 1, 3).reshape(M1 * M0, N1 * N0)
     x_mn = x_mn[:slice_m, :slice_n]  # clip padding
 
     if reduce_mode == 0: 
